@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { courtPhrases, findCourtPhrase } from "@/lib/phrase-dictionary";
 
 type Language = "en" | "pcm";
 type Result = { translation: string; sourceLanguage: Language; targetLanguage: Language; warnings: string[]; requiresHumanReview: boolean };
@@ -22,16 +23,6 @@ type RecognitionLike = {
 type RecognitionConstructor = new () => RecognitionLike;
 
 const languageName: Record<Language, string> = { en: "English", pcm: "Nigerian Pidgin" };
-const examples = [
-  { category: "Courtroom conduct", text: "Please stand while the court is in session." },
-  { category: "Courtroom conduct", text: "Please take your seat." },
-  { category: "Waiting instructions", text: "Please wait until your name is called." },
-  { category: "Hearing dates", text: "Please return to court on Monday at 9:00 AM." },
-  { category: "Document submission", text: "Please submit the required documents." },
-  { category: "Adjournments", text: "The hearing has been adjourned until the stated date." },
-  { category: "Courtroom conduct", text: "Please speak clearly and wait for your turn." },
-  { category: "Courtroom conduct", text: "Please listen carefully to the instructions." },
-];
 
 function getSpeechConstructor(): RecognitionConstructor | undefined {
   if (typeof window === "undefined") return undefined;
@@ -44,17 +35,18 @@ export default function Home() {
   const [targetLanguage, setTargetLanguage] = useState<Language>("pcm");
   const [text, setText] = useState("");
   const [turns, setTurns] = useState<Turn[]>([]);
-  const [busy, setBusy] = useState(false);
   const [dictating, setDictating] = useState(false);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const [speechAvailable, setSpeechAvailable] = useState(false);
+  const [playingTurnId, setPlayingTurnId] = useState<number | null>(null);
   const [recognitionAvailable, setRecognitionAvailable] = useState(false);
   const audioRef = useRef<SpeechSynthesis | null>(null);
   const recognitionRef = useRef<RecognitionLike | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const nextTurnId = useRef(0);
+  const playbackToken = useRef(0);
 
   useEffect(() => {
     if ("speechSynthesis" in window) {
@@ -63,6 +55,7 @@ export default function Home() {
     }
     setRecognitionAvailable(Boolean(getSpeechConstructor()));
     return () => {
+      playbackToken.current += 1;
       audioRef.current?.cancel();
       recognitionRef.current?.abort();
     };
@@ -70,10 +63,12 @@ export default function Home() {
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [turns, busy]);
+  }, [turns]);
 
   function stopAudio() {
+    playbackToken.current += 1;
     audioRef.current?.cancel();
+    setPlayingTurnId(null);
     setStatus("Audio stopped.");
   }
 
@@ -139,38 +134,51 @@ export default function Home() {
     }
   }
 
+  function showPhrase(phrase: (typeof courtPhrases)[number]) {
+    playbackToken.current += 1;
+    audioRef.current?.cancel();
+    setPlayingTurnId(null);
+    setSourceLanguage("en");
+    setTargetLanguage("pcm");
+    setText("");
+    setError("");
+    setTurns([{
+      id: nextTurnId.current++,
+      sourceText: phrase.english,
+      result: {
+        translation: phrase.pidgin,
+        sourceLanguage: "en",
+        targetLanguage: "pcm",
+        warnings: [phrase.note ?? "This is a predefined local example, not a certified or human-reviewed interpretation."],
+        requiresHumanReview: true,
+      },
+    }]);
+    setStatus(`${phrase.category} example displayed from the local phrase library.`);
+  }
+
   async function translate() {
-    if (busy) return;
     const submittedText = text.trim();
     if (!submittedText) {
       setError("Type a message or use dictation before translating.");
       composerRef.current?.focus();
       return;
     }
-    setBusy(true);
     setError("");
     setStatus("");
     audioRef.current?.cancel();
-    try {
-      const response = await fetch("/api/translate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: submittedText, sourceLanguage, targetLanguage }),
-      });
-      const data = await response.json() as Result & { error?: string };
-      if (!response.ok) throw new Error(data.error || "Translation could not be completed. Please try again.");
-      if (typeof data.translation !== "string" || !Array.isArray(data.warnings)) {
-        throw new Error("The translation service returned an unreadable response. Please retry.");
-      }
-      setTurns((current) => [...current, { id: nextTurnId.current++, sourceText: submittedText, result: data }]);
-      setText("");
-      setStatus("Translation complete. Verify important details with a qualified human.");
-    } catch (failure) {
-      setError(failure instanceof Error ? failure.message : "Translation could not be completed. Please try again.");
-    } finally {
-      setBusy(false);
+    if (sourceLanguage !== "en" || targetLanguage !== "pcm") {
+      setError("The offline phrase library currently supports English to Nigerian Pidgin only. Choose that direction or use a phrase example.");
       composerRef.current?.focus();
+      return;
     }
+    const phrase = findCourtPhrase(submittedText);
+    if (!phrase) {
+      setError("This offline prototype only interprets its 40 listed phrase examples. Choose an example or enter an exact phrase from the library. Custom sentences are not sent to an AI service.");
+      composerRef.current?.focus();
+      return;
+    }
+    showPhrase(phrase);
+    composerRef.current?.focus();
   }
 
   async function copyResult(result: Result) {
@@ -182,24 +190,68 @@ export default function Home() {
     }
   }
 
-  function playAudio(result: Result) {
+  async function playAudio(result: Result, turnId: number) {
     if (!audioRef.current || typeof SpeechSynthesisUtterance === "undefined") {
       setStatus("Audio playback is not available in this browser.");
       return;
     }
-    audioRef.current.cancel();
+    const speech = audioRef.current;
+    const token = ++playbackToken.current;
+    speech.cancel();
+    setPlayingTurnId(turnId);
+    setStatus("Checking voices available on this device…");
+    let voices = speech.getVoices();
+    if (voices.length === 0) {
+      voices = await new Promise<SpeechSynthesisVoice[]>((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          window.clearTimeout(timeout);
+          speech.removeEventListener("voiceschanged", onVoicesChanged);
+          resolve(speech.getVoices());
+        };
+        const onVoicesChanged = () => finish();
+        const timeout = window.setTimeout(finish, 1200);
+        speech.addEventListener("voiceschanged", onVoicesChanged);
+      });
+    }
+    if (token !== playbackToken.current) return;
+    const femaleVoiceHint = /female|woman|zira|susan|heera|aria|jenny|ava|samantha|victoria|sara|karen|moira|tessa/i;
+    const isNigerianEnglish = (item: SpeechSynthesisVoice) => item.lang.toLowerCase() === "en-ng"
+      || /nigeria|nigerian/i.test(item.name);
+    const voice = voices.find((item) => isNigerianEnglish(item) && femaleVoiceHint.test(item.name))
+      || voices.find((item) => isNigerianEnglish(item))
+      || voices.find((item) => item.lang.toLowerCase().startsWith("en") && femaleVoiceHint.test(item.name))
+      || voices.find((item) => item.lang.toLowerCase().startsWith("en"));
     const utterance = new SpeechSynthesisUtterance(result.translation);
-    const voices = audioRef.current.getVoices();
-    const voice = result.targetLanguage === "en"
-      ? voices.find((item) => item.lang.toLowerCase().startsWith("en"))
-      : voices.find((item) => item.lang.toLowerCase() === "en-ng");
+    utterance.lang = voice?.lang || "en-NG";
     if (voice) utterance.voice = voice;
-    utterance.onstart = () => setStatus(result.targetLanguage === "pcm" && !voice
-      ? "Speaking with a default system voice. Nigerian Pidgin pronunciation is not assured."
+    utterance.onstart = () => setStatus(result.targetLanguage === "pcm"
+      ? voice && isNigerianEnglish(voice) && femaleVoiceHint.test(voice.name)
+        ? `Speaking with ${voice.name}. Pidgin pronunciation still depends on this device's voice. `
+        : voice
+          ? `No Nigerian female voice was identified. Using ${voice.name}; Pidgin pronunciation may vary.`
+          : "No English voice is listed on this device. Using its default speech voice; Pidgin pronunciation may vary."
       : "Playing translated speech.");
-    utterance.onend = () => setStatus("Audio playback finished.");
-    utterance.onerror = () => setStatus("Audio playback failed. The translation text is still available.");
-    audioRef.current.speak(utterance);
+    utterance.onend = () => {
+      if (token === playbackToken.current) {
+        setPlayingTurnId(null);
+        setStatus("Audio playback finished.");
+      }
+    };
+    utterance.onerror = () => {
+      if (token === playbackToken.current) {
+        setPlayingTurnId(null);
+        setStatus("Audio playback failed. The translation text is still available.");
+      }
+    };
+    try {
+      speech.speak(utterance);
+    } catch {
+      setPlayingTurnId(null);
+      setStatus("Audio playback failed. The translation text is still available.");
+    }
   }
 
   function clearConversation() {
@@ -211,7 +263,7 @@ export default function Home() {
     setStatus("This conversation has been cleared from the page.");
   }
 
-  const isEmpty = turns.length === 0 && !busy;
+  const isEmpty = turns.length === 0;
 
   return <main className="chat-shell">
     <header className="chat-header">
@@ -221,7 +273,7 @@ export default function Home() {
         <span className="header-chevron" aria-hidden="true">v</span>
       </Link>
       <div className="header-actions">
-        <span className="privacy-tag">AI translation support</span>
+        <span className="privacy-tag">Offline phrase library</span>
         {turns.length > 0 && <button className="header-button" onClick={clearConversation} title="Clear this conversation">Clear chat</button>}
       </div>
     </header>
@@ -229,8 +281,8 @@ export default function Home() {
     <section className={`conversation ${isEmpty ? "conversation-empty" : ""}`} aria-label="Translation conversation" ref={scrollRef}>
       {isEmpty ? <div className="welcome">
         <div className="welcome-orb" aria-hidden="true"><span /></div>
-        <h1>What would you like to interpret?</h1>
-        <p>Translate simple courtroom instructions between English and Nigerian Pidgin.</p>
+        <h1>Find a courtroom phrase</h1>
+        <p>Choose from 40 everyday court instructions in English and Nigerian Pidgin. The phrase library works offline and does not send your text to an AI service at the moment.</p>
       </div> : <div className="turn-list">
         {turns.map(({ id, sourceText, result }) => <article className="turn" key={id}>
           <div className="user-message">
@@ -238,16 +290,17 @@ export default function Home() {
             <p>{sourceText}</p>
           </div>
           <div className="assistant-message">
-            <div className="assistant-heading"><span className="assistant-mark" aria-hidden="true">N</span><strong>Translation</strong><span className="message-language">{languageName[result.targetLanguage]}</span><span className="ai-badge">AI-generated</span></div>
+            <div className="assistant-heading"><span className="assistant-mark" aria-hidden="true">N</span><strong>Interpretation</strong><span className="message-language">{languageName[result.targetLanguage]}</span><span className="ai-badge">Local example</span></div>
             <p className="translated-text">{result.translation}</p>
             <div className="message-tools">
               <button onClick={() => copyResult(result)} aria-label="Copy translation"><CopyIcon />Copy</button>
-              {speechAvailable && <><button onClick={() => playAudio(result)} aria-label="Listen to translation"><SpeakerIcon />Listen</button><button onClick={stopAudio} aria-label="Stop audio"><StopIcon />Stop</button></>}
+              {speechAvailable
+                ? <><button onClick={() => void playAudio(result, id)} aria-pressed={playingTurnId === id} aria-label={playingTurnId === id ? "Translation playing" : "Listen to translation"}><SpeakerIcon />{playingTurnId === id ? "Playing…" : "Listen"}</button><button onClick={stopAudio} aria-label="Stop audio"><StopIcon />Stop</button></>
+                : <span className="speech-unavailable" role="status">Audio playback is not available in this browser.</span>}
             </div>
-            <div className="review-note"><strong>Human review required.</strong> Check names, dates, times, amounts, negations, and procedural details before relying on this. {result.warnings.length > 0 && <ul>{result.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>}</div>
+            {result.targetLanguage === "pcm" && speechAvailable && <p className="speech-note">Playback prefers a Nigerian female voice when one can be identified on this device. Pidgin pronunciation may vary.</p>}
           </div>
         </article>)}
-        {busy && <div className="thinking" role="status"><span className="thinking-dot" />Preparing translation...</div>}
       </div>}
     </section>
 
@@ -287,24 +340,25 @@ export default function Home() {
               </select>
               <label className="sr-only" htmlFor="example-phrase">Insert an example phrase</label>
               <select className="example-select" id="example-phrase" value="" onChange={(event) => {
-                const example = examples[Number(event.target.value)];
-                if (example) { setText(example.text); setError(""); setStatus(`${example.category} example loaded. Edit it before translating if needed.`); composerRef.current?.focus(); }
+                const phrase = courtPhrases.find((item) => item.id === event.target.value);
+                if (phrase) showPhrase(phrase);
               }}>
-                <option value="">Examples</option>{examples.map((example, index) => <option key={example.text} value={index}>{example.text}</option>)}
+                <option value="">Examples (40)</option>{Array.from(new Set(courtPhrases.map((phrase) => phrase.category))).map((category) => <optgroup key={category} label={category}>{courtPhrases.filter((phrase) => phrase.category === category).map((phrase) => <option key={phrase.id} value={phrase.id}>{phrase.english}</option>)}</optgroup>)}
               </select>
             </div>
             <div className="composer-right">
               {text && <button className="icon-button clear-button" onClick={() => { setText(""); setError(""); setStatus("Draft cleared."); composerRef.current?.focus(); }} aria-label="Clear draft" title="Clear draft"><ClearIcon /></button>}
               {recognitionAvailable && <button className={`icon-button microphone-button ${dictating ? "is-recording" : ""}`} onClick={startDictation} aria-pressed={dictating} aria-label={dictating ? "Stop dictation" : "Start dictation"} title={dictating ? "Stop dictation" : "Dictate (browser speech recognition)"}><MicIcon /></button>}
-              <button className="send-button" onClick={() => void translate()} disabled={busy || !text.trim()} aria-label={busy ? "Translating" : "Translate message"}>{busy ? <SpinnerIcon /> : <ArrowIcon />}</button>
+              <button className="send-button" onClick={() => void translate()} disabled={!text.trim()} aria-label="Interpret phrase"><ArrowIcon /></button>
             </div>
           </div>
         </div>
-        <div className="composer-status" aria-live="polite" role={error ? "alert" : "status"}>
-          {error || (dictating ? status : status)}
+        {error && <div className="composer-error" role="alert">{error}</div>}
+        <div className="composer-status" aria-live="polite" role="status">
+          {!error && status}
           {dictating && <span className="listening-indicator"><i />Listening</span>}
         </div>
-        <p className="legal-note">AI translations may be inaccurate. Browser dictation may process audio using your browser provider; check the transcript. This tool is not a certified interpreter. Get qualified human verification for consequential courtroom communication.</p>
+        <p className="legal-note">Phrase examples support basic communication; they are not certified court interpretations. For an unclear or consequential instruction, ask court staff or a qualified interpreter. Voice options and Pidgin pronunciation vary by device.</p>
       </div>
     </footer>
   </main>;
@@ -317,4 +371,3 @@ function SwapIcon() { return <svg viewBox="0 0 20 20" aria-hidden="true"><path d
 function MicIcon() { return <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="7" y="2.5" width="6" height="10" rx="3" /><path d="M4.5 9.5a5.5 5.5 0 0 0 11 0M10 15v3m-3 0h6" /></svg>; }
 function ClearIcon() { return <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15" /></svg>; }
 function ArrowIcon() { return <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 15V4m0 0L5.5 8.5M10 4l4.5 4.5" /></svg>; }
-function SpinnerIcon() { return <svg className="spinner" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7" /></svg>; }

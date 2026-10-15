@@ -4,8 +4,11 @@ import { classifyProviderError, safeProviderMessage } from "./provider-errors";
 describe("provider failures", () => {
   it.each([
     [{ status: 401 }, "auth"], [{ status: 429 }, "rate_limit"],
+    [{ status: 429, code: "insufficient_quota" }, "quota"],
+    [{ status: 404 }, "model"], [{ status: 400 }, "request"],
     [{ name: "APIConnectionTimeoutError" }, "timeout"],
     [{ name: "APIConnectionError" }, "network"],
+    [Object.assign(new Error("connection failed"), { constructor: { name: "APIConnectionError" } }), "network"],
     [{ message: "unclassified" }, "provider"],
   ] as const)("classifies provider error %j", (failure, expected) => {
     expect(classifyProviderError(failure)).toBe(expected);

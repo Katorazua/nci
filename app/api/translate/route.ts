@@ -33,7 +33,7 @@ export async function POST(request: Request) {
     return NextResponse.json(validated, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     if (error instanceof ProviderError) {
-      const status = error.kind === "unconfigured" ? 503 : error.kind === "auth" ? 502 : error.kind === "rate_limit" ? 429 : 502;
+      const status = error.kind === "unconfigured" ? 503 : error.kind === "rate_limit" || error.kind === "quota" ? 429 : 502;
       return NextResponse.json({ error: safeProviderMessage(error.kind) }, { status });
     }
     if (error instanceof ZodError || error instanceof SyntaxError) return NextResponse.json({ error: "The translation service returned an unreadable response. Please retry." }, { status: 502 });

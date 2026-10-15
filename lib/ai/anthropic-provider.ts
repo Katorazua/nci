@@ -8,7 +8,7 @@ export class AnthropicProvider implements TranslationProvider {
   async translate(input: TranslationInput): Promise<unknown> {
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, timeout: 20000, maxRetries: 0 });
     const response = await client.messages.create({
-      model: process.env.ANTHROPIC_MODEL || "claude-3-5-haiku-latest", max_tokens: 1000, temperature: 0,
+      model: process.env.ANTHROPIC_MODEL || "claude-haiku-5-5", max_tokens: 1000,
       system: translationSystemPrompt,
       messages: [{ role: "user", content: JSON.stringify({ text: input.text, sourceLanguage: input.sourceLanguage, sourceLanguageName: languageNames[input.sourceLanguage], targetLanguage: input.targetLanguage, targetLanguageName: languageNames[input.targetLanguage] }) }],
     });
