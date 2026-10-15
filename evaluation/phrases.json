@@ -1,0 +1,8 @@
+[
+  { "text": "Please stand while the court is in session.", "direction": "en-to-pcm", "review": "Check respectful register and preserve that standing is required only during the session." },
+  { "text": "Please return to court on Monday at 9:00 AM.", "direction": "en-to-pcm", "review": "Check weekday and exact time are retained." },
+  { "text": "Do not leave the courtroom until your name is called.", "direction": "en-to-pcm", "review": "Check prohibition and negation are preserved." },
+  { "text": "The hearing has been adjourned until the stated date.", "direction": "en-to-pcm", "review": "Check no unstated date is invented and adjournment meaning is clear." },
+  { "text": "Abeg bring the required documents on Friday by 10:30 AM.", "direction": "pcm-to-en", "review": "Check documents, weekday, and exact time are retained." },
+  { "text": "You fit wait outside until dem call your name?", "direction": "pcm-to-en", "review": "Check this remains a question/request, not a court order." }
+]
